@@ -43,6 +43,71 @@ struct HeartEmoji: Identifiable {
     var offset: CGFloat = 0
 }
 
+struct ChatMessage: Identifiable {
+    let id = UUID()
+    let content: String
+    let isUser: Bool
+    let timestamp: Date
+    var isTyping: Bool = false
+    var displayedText: String = ""
+}
+
+struct ChatMessageView: View {
+    let message: ChatMessage
+    let colorScheme: ColorScheme
+    
+    var body: some View {
+        HStack {
+            if message.isUser {
+                Spacer()
+                VStack(alignment: .trailing, spacing: 4) {
+                    Text(message.content)
+                        .font(.system(size: 14))
+                        .foregroundColor(colorScheme == .light ? .white : .black)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(Color.blue)
+                        .cornerRadius(12)
+                    
+                    Text(formatTimestamp(message.timestamp))
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                }
+            } else {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(alignment: .bottom, spacing: 4) {
+                        Text(message.isTyping ? message.displayedText : message.content)
+                            .font(.system(size: 14))
+                            .foregroundColor(colorScheme == .light ? .black : .white)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .background(Color.gray.opacity(0.2))
+                            .cornerRadius(12)
+                        
+                        if message.isTyping {
+                            Text("▋")
+                                .font(.system(size: 14))
+                                .foregroundColor(colorScheme == .light ? .black : .white)
+                                .opacity(0.7)
+                        }
+                    }
+                    
+                    Text(formatTimestamp(message.timestamp))
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+            }
+        }
+    }
+    
+    private func formatTimestamp(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.timeStyle = .short
+        return formatter.string(from: date)
+    }
+}
+
 struct ContentView: View {
     private let headerString = "\n\n"
     @State private var entries: [HumanEntry] = []
@@ -73,6 +138,13 @@ struct ContentView: View {
     @State private var showingChatMenu = false
     @State private var chatMenuAnchor: CGPoint = .zero
     @State private var showingSidebar = false  // Add this state variable
+    @State private var showingChatSidebar = false  // Add chat sidebar state
+    @State private var chatMessages: [ChatMessage] = []
+    @State private var chatInputText: String = ""
+    @State private var openaiApiKey: String = UserDefaults.standard.string(forKey: "openaiApiKey") ?? ""
+    @State private var geminiApiKey: String = UserDefaults.standard.string(forKey: "geminiApiKey") ?? ""
+    @State private var selectedAIProvider: String = UserDefaults.standard.string(forKey: "selectedAIProvider") ?? "openai"
+    @State private var isSendingMessage: Bool = false
     @State private var hoveredTrashId: UUID? = nil
     @State private var hoveredExportId: UUID? = nil
     @State private var placeholderText: String = ""  // Add this line
@@ -396,7 +468,10 @@ struct ContentView: View {
                 Color(colorScheme == .light ? .white : .black)
                     .ignoresSafeArea()
                 
-              
+                                VStack {
+                    Spacer()
+                        .frame(height: 40)
+                    
                     TextEditor(text: Binding(
                         get: { text },
                         set: { newValue in
@@ -414,13 +489,22 @@ struct ContentView: View {
                     .scrollContentBackground(.hidden)
                     .scrollIndicators(.never)
                     .lineSpacing(lineHeight)
-                    .frame(maxWidth: 650)
+                    .frame(maxWidth: 1000)
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 20)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10)
+                            .stroke(colorScheme == .light ? Color.gray.opacity(0.3) : Color.gray.opacity(0.2), lineWidth: 0.5)
+                    )
                     
           
                     .id("\(selectedFont)-\(fontSize)-\(colorScheme)")
                     .padding(.bottom, bottomNavOpacity > 0 ? navHeight : 0)
                     .ignoresSafeArea()
                     .colorScheme(colorScheme)
+                    
+                    Spacer()
+                }
                     .onAppear {
                         placeholderText = placeholderOptions.randomElement() ?? "\n\nBegin writing"
                         // Removed findSubview code which was causing errors
@@ -431,10 +515,8 @@ struct ContentView: View {
                                 Text(placeholderText)
                                     .font(.custom(selectedFont, size: fontSize))
                                     .foregroundColor(colorScheme == .light ? .gray.opacity(0.5) : .gray.opacity(0.6))
-                                // .padding(.top, 8)
-                                // .padding(.leading, 8)
                                     .allowsHitTesting(false)
-                                    .offset(x: 5, y: placeholderOffset)
+                                    .offset(x: 20, y: 10)
                             }
                         }, alignment: .topLeading
                     )
@@ -443,7 +525,7 @@ struct ContentView: View {
                                 } action: { height in
                                     viewHeight = height
                                 }
-                                .contentMargins(.bottom, viewHeight / 4)
+
                     
                 
                 VStack {
@@ -622,8 +704,10 @@ struct ContentView: View {
                                 .foregroundColor(.gray)
                             
                             Button("Chat") {
-                                showingChatMenu = true
-                                // Ensure didCopyPrompt is reset when opening the menu
+                                withAnimation(.easeInOut(duration: 0.2)) {
+                                    showingChatSidebar.toggle()
+                                }
+                                // Ensure didCopyPrompt is reset when opening the sidebar
                                 didCopyPrompt = false
                             }
                             .buttonStyle(.plain)
@@ -635,142 +719,6 @@ struct ContentView: View {
                                     NSCursor.pointingHand.push()
                                 } else {
                                     NSCursor.pop()
-                                }
-                            }
-                            .popover(isPresented: $showingChatMenu, attachmentAnchor: .point(UnitPoint(x: 0.5, y: 0)), arrowEdge: .top) {
-                                VStack(spacing: 0) { // Wrap everything in a VStack for consistent styling and onChange
-                                    let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
-                                    
-                                    // Calculate potential URL lengths
-                                    let gptFullText = aiChatPrompt + "\n\n" + trimmedText
-                                    let claudeFullText = claudePrompt + "\n\n" + trimmedText
-                                    let encodedGptText = gptFullText.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
-                                    let encodedClaudeText = claudeFullText.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
-                                    
-                                    let gptUrlLength = "https://chat.openai.com/?m=".count + encodedGptText.count
-                                    let claudeUrlLength = "https://claude.ai/new?q=".count + encodedClaudeText.count
-                                    let isUrlTooLong = gptUrlLength > 6000 || claudeUrlLength > 6000
-                                    
-                                    if isUrlTooLong {
-                                        // View for long text (URL too long)
-                                        Text("Hey, your entry is long. It'll break the URL. Instead, copy prompt by clicking below and paste into AI of your choice!")
-                                            .font(.system(size: 14))
-                                            .foregroundColor(popoverTextColor)
-                                            .lineLimit(nil)
-                                            .multilineTextAlignment(.leading)
-                                            .frame(width: 200, alignment: .leading)
-                                            .padding(.horizontal, 12)
-                                            .padding(.vertical, 8)
-                                        
-                                        Divider()
-                                        
-                                        Button(action: {
-                                            copyPromptToClipboard()
-                                            didCopyPrompt = true
-                                        }) {
-                                            Text(didCopyPrompt ? "Copied!" : "Copy Prompt")
-                                                .frame(maxWidth: .infinity, alignment: .leading)
-                                                .padding(.horizontal, 12)
-                                                .padding(.vertical, 8)
-                                        }
-                                        .buttonStyle(.plain)
-                                        .foregroundColor(popoverTextColor)
-                                        .onHover { hovering in
-                                            if hovering {
-                                                NSCursor.pointingHand.push()
-                                            } else {
-                                                NSCursor.pop()
-                                            }
-                                        }
-                                        
-                                    } else if text.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("hi. my name is farza.") {
-                                        Text("Yo. Sorry, you can't chat with the guide lol. Please write your own entry.")
-                                            .font(.system(size: 14))
-                                            .foregroundColor(popoverTextColor)
-                                            .frame(width: 250)
-                                            .padding(.horizontal, 12)
-                                            .padding(.vertical, 8)
-                                    } else if text.count < 350 {
-                                        Text("Please free write for at minimum 5 minutes first. Then click this. Trust.")
-                                            .font(.system(size: 14))
-                                            .foregroundColor(popoverTextColor)
-                                            .frame(width: 250)
-                                            .padding(.horizontal, 12)
-                                            .padding(.vertical, 8)
-                                    } else {
-                                        // View for normal text length
-                                        Button(action: {
-                                            showingChatMenu = false
-                                            openChatGPT()
-                                        }) {
-                                            Text("ChatGPT")
-                                                .frame(maxWidth: .infinity, alignment: .leading)
-                                                .padding(.horizontal, 12)
-                                                .padding(.vertical, 8)
-                                        }
-                                        .buttonStyle(.plain)
-                                        .foregroundColor(popoverTextColor)
-                                        .onHover { hovering in
-                                            if hovering {
-                                                NSCursor.pointingHand.push()
-                                            } else {
-                                                NSCursor.pop()
-                                            }
-                                        }
-                                        
-                                        Divider()
-                                        
-                                        Button(action: {
-                                            showingChatMenu = false
-                                            openClaude()
-                                        }) {
-                                            Text("Claude")
-                                                .frame(maxWidth: .infinity, alignment: .leading)
-                                                .padding(.horizontal, 12)
-                                                .padding(.vertical, 8)
-                                        }
-                                        .buttonStyle(.plain)
-                                        .foregroundColor(popoverTextColor)
-                                        .onHover { hovering in
-                                            if hovering {
-                                                NSCursor.pointingHand.push()
-                                            } else {
-                                                NSCursor.pop()
-                                            }
-                                        }
-                                        
-                                        Divider()
-                                        
-                                        Button(action: {
-                                            // Don't dismiss menu, just copy and update state
-                                            copyPromptToClipboard()
-                                            didCopyPrompt = true
-                                        }) {
-                                            Text(didCopyPrompt ? "Copied!" : "Copy Prompt")
-                                                .frame(maxWidth: .infinity, alignment: .leading)
-                                                .padding(.horizontal, 12)
-                                                .padding(.vertical, 8)
-                                        }
-                                        .buttonStyle(.plain)
-                                        .foregroundColor(popoverTextColor)
-                                        .onHover { hovering in
-                                            if hovering {
-                                                NSCursor.pointingHand.push()
-                                            } else {
-                                                NSCursor.pop()
-                                            }
-                                        }
-                                    }
-                                }
-                                .frame(minWidth: 120, maxWidth: 250) // Allow width to adjust
-                                .background(popoverBackgroundColor)
-                                .cornerRadius(8)
-                                .shadow(color: Color.black.opacity(0.1), radius: 4, y: 2)
-                                // Reset copied state when popover dismisses
-                                .onChange(of: showingChatMenu) { newValue in
-                                    if !newValue {
-                                        didCopyPrompt = false
-                                    }
                                 }
                             }
                             
@@ -883,6 +831,182 @@ struct ContentView: View {
                         }
                     }
                 }
+            }
+            
+            // Chat sidebar
+            if showingChatSidebar {
+                Divider()
+                
+                VStack(spacing: 0) {
+                    // Header
+                    HStack {
+                        Text("Chat")
+                            .font(.system(size: 13))
+                            .foregroundColor(textColor)
+                        Spacer()
+                        Button(action: {
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                showingChatSidebar = false
+                            }
+                        }) {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 12))
+                                .foregroundColor(textColor)
+                        }
+                        .buttonStyle(.plain)
+                        .onHover { hovering in
+                            if hovering {
+                                NSCursor.pointingHand.push()
+                            } else {
+                                NSCursor.pop()
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
+                    
+                    Divider()
+                    
+                    // API Key Section
+                    VStack(alignment: .leading, spacing: 12) {
+                        // AI Provider Selection
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("AI Provider")
+                                .font(.system(size: 12))
+                                .foregroundColor(textColor)
+                            
+                            HStack(spacing: 8) {
+                                Button(action: {
+                                    selectedAIProvider = "openai"
+                                    UserDefaults.standard.set("openai", forKey: "selectedAIProvider")
+                                }) {
+                                    Text("OpenAI")
+                                        .font(.system(size: 12))
+                                        .padding(.horizontal, 12)
+                                        .padding(.vertical, 6)
+                                        .background(selectedAIProvider == "openai" ? Color.blue : Color.gray.opacity(0.1))
+                                        .foregroundColor(selectedAIProvider == "openai" ? .white : textColor)
+                                        .cornerRadius(6)
+                                }
+                                .buttonStyle(.plain)
+                                
+                                Button(action: {
+                                    selectedAIProvider = "gemini"
+                                    UserDefaults.standard.set("gemini", forKey: "selectedAIProvider")
+                                }) {
+                                    Text("Gemini")
+                                        .font(.system(size: 12))
+                                        .padding(.horizontal, 12)
+                                        .padding(.vertical, 6)
+                                        .background(selectedAIProvider == "gemini" ? Color.blue : Color.gray.opacity(0.1))
+                                        .foregroundColor(selectedAIProvider == "gemini" ? .white : textColor)
+                                        .cornerRadius(6)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                        
+                        // OpenAI API Key
+                        if selectedAIProvider == "openai" {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("OpenAI API Key")
+                                    .font(.system(size: 12))
+                                    .foregroundColor(textColor)
+                                
+                                SecureField("sk-...", text: $openaiApiKey)
+                                    .textFieldStyle(PlainTextFieldStyle())
+                                    .font(.system(size: 12))
+                                    .padding(8)
+                                    .background(Color.gray.opacity(0.1))
+                                    .cornerRadius(6)
+                                    .onChange(of: openaiApiKey) { newValue in
+                                        UserDefaults.standard.set(newValue, forKey: "openaiApiKey")
+                                    }
+                            }
+                        }
+                        
+                        // Gemini API Key
+                        if selectedAIProvider == "gemini" {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Gemini API Key")
+                                    .font(.system(size: 12))
+                                    .foregroundColor(textColor)
+                                
+                                SecureField("AIza...", text: $geminiApiKey)
+                                    .textFieldStyle(PlainTextFieldStyle())
+                                    .font(.system(size: 12))
+                                    .padding(8)
+                                    .background(Color.gray.opacity(0.1))
+                                    .cornerRadius(6)
+                                    .onChange(of: geminiApiKey) { newValue in
+                                        UserDefaults.standard.set(newValue, forKey: "geminiApiKey")
+                                    }
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    
+                    Divider()
+                    
+                    // Chat Messages
+                    ScrollViewReader { proxy in
+                        ScrollView {
+                            LazyVStack(spacing: 12) {
+                                ForEach(chatMessages) { message in
+                                    ChatMessageView(message: message, colorScheme: colorScheme)
+                                }
+                            }
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 8)
+                        }
+                        .onChange(of: chatMessages.count) { _ in
+                            if let lastMessage = chatMessages.last {
+                                withAnimation(.easeOut(duration: 0.3)) {
+                                    proxy.scrollTo(lastMessage.id, anchor: .bottom)
+                                }
+                            }
+                        }
+                    }
+                    .frame(maxHeight: .infinity)
+                    
+                    Divider()
+                    
+                    // Input Field
+                    HStack(spacing: 8) {
+                        TextField("Type your message...", text: $chatInputText, axis: .vertical)
+                            .textFieldStyle(PlainTextFieldStyle())
+                            .font(.system(size: 14))
+                            .lineLimit(1...4)
+                            .padding(8)
+                            .background(Color.gray.opacity(0.1))
+                            .cornerRadius(6)
+                            .onSubmit {
+                                sendMessage()
+                            }
+                        
+                        Button(action: {
+                            sendMessage()
+                        }) {
+                            Image(systemName: isSendingMessage ? "clock" : "arrow.up")
+                                .font(.system(size: 12))
+                                .foregroundColor(isSendingMessage ? .gray : textColor)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(chatInputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isSendingMessage)
+                        .onHover { hovering in
+                            if hovering && !chatInputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !isSendingMessage {
+                                NSCursor.pointingHand.push()
+                            } else {
+                                NSCursor.pop()
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
+                }
+                .frame(width: 300)
+                .background(Color(colorScheme == .light ? .white : NSColor.black))
             }
             
             // Right sidebar
@@ -1035,6 +1159,7 @@ struct ContentView: View {
         }
         .frame(minWidth: 1100, minHeight: 600)
         .animation(.easeInOut(duration: 0.2), value: showingSidebar)
+        .animation(.easeInOut(duration: 0.2), value: showingChatSidebar)
         .preferredColorScheme(colorScheme)
         .onAppear {
             showingSidebar = false  // Hide sidebar by default
@@ -1178,6 +1303,276 @@ struct ContentView: View {
         pasteboard.clearContents()
         pasteboard.setString(fullText, forType: .string)
         print("Prompt copied to clipboard")
+    }
+    
+    private func sendMessage() {
+        let trimmedInput = chatInputText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedInput.isEmpty && !isSendingMessage else { return }
+        
+        // Add user message
+        let userMessage = ChatMessage(content: trimmedInput, isUser: true, timestamp: Date())
+        chatMessages.append(userMessage)
+        
+        // Clear input
+        chatInputText = ""
+        
+        // Set sending state
+        isSendingMessage = true
+        
+        // Send to selected AI provider
+        if selectedAIProvider == "openai" {
+            sendToOpenAI(message: trimmedInput) { response in
+                DispatchQueue.main.async {
+                    self.isSendingMessage = false
+                    
+                    if let response = response {
+                        let assistantMessage = ChatMessage(content: response, isUser: false, timestamp: Date())
+                        self.chatMessages.append(assistantMessage)
+                    } else {
+                        let errorMessage = ChatMessage(content: "Sorry, I couldn't process your message. Please check your OpenAI API key and try again.", isUser: false, timestamp: Date())
+                        self.chatMessages.append(errorMessage)
+                    }
+                }
+            }
+        } else {
+            sendToGemini(message: trimmedInput) { response in
+                DispatchQueue.main.async {
+                    self.isSendingMessage = false
+                    
+                    if let response = response {
+                        let assistantMessage = ChatMessage(content: response, isUser: false, timestamp: Date(), isTyping: true, displayedText: "")
+                        self.chatMessages.append(assistantMessage)
+                        self.startTypingEffect(for: assistantMessage.id, fullText: response)
+                    } else {
+                        let errorMessage = ChatMessage(content: "Sorry, I couldn't process your message. Please check your Gemini API key and try again.", isUser: false, timestamp: Date())
+                        self.chatMessages.append(errorMessage)
+                    }
+                }
+            }
+        }
+    }
+    
+    private func sendToOpenAI(message: String, completion: @escaping (String?) -> Void) {
+        guard !openaiApiKey.isEmpty else {
+            completion("Please set your OpenAI API key first.")
+            return
+        }
+        
+        let url = URL(string: "https://api.openai.com/v1/chat/completions")!
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(openaiApiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        
+        let requestBody: [String: Any] = [
+            "model": "gpt-3.5-turbo",
+            "messages": [
+                ["role": "system", "content": "You are a helpful assistant that helps with writing and journaling. Keep responses concise and supportive."],
+                ["role": "user", "content": message]
+            ],
+            "max_tokens": 500,
+            "temperature": 0.7
+        ]
+        
+        do {
+            request.httpBody = try JSONSerialization.data(withJSONObject: requestBody)
+        } catch {
+            completion(nil)
+            return
+        }
+        
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            if let error = error {
+                print("Error: \(error)")
+                completion(nil)
+                return
+            }
+            
+            guard let data = data else {
+                completion(nil)
+                return
+            }
+            
+            do {
+                if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let choices = json["choices"] as? [[String: Any]],
+                   let firstChoice = choices.first,
+                   let message = firstChoice["message"] as? [String: Any],
+                   let content = message["content"] as? String {
+                    completion(content)
+                } else {
+                    completion(nil)
+                }
+            } catch {
+                print("JSON parsing error: \(error)")
+                completion(nil)
+            }
+        }.resume()
+    }
+    
+    private func sendToGemini(message: String, completion: @escaping (String?) -> Void) {
+        print("🔍 DEBUG: Starting Gemini API call")
+        print("🔍 DEBUG: API Key length: \(geminiApiKey.count)")
+        print("🔍 DEBUG: API Key starts with: \(geminiApiKey.prefix(10))...")
+        
+        guard !geminiApiKey.isEmpty else {
+            print("❌ DEBUG: API key is empty")
+            completion("Please set your Gemini API key first.")
+            return
+        }
+        
+        let urlString = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+        print("🔍 DEBUG: URL: \(urlString)")
+        
+        guard let url = URL(string: urlString) else {
+            print("❌ DEBUG: Invalid URL")
+            completion(nil)
+            return
+        }
+        var request = URLRequest(url: url, timeoutInterval: Double.infinity)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(geminiApiKey, forHTTPHeaderField: "X-goog-api-key")
+        
+        let requestBody: [String: Any] = [
+            "contents": [
+                [
+                    "parts": [
+                        [
+                            "text": "You are a helpful assistant that helps with writing and journaling. Keep responses concise and supportive. User message: \(message)"
+                        ]
+                    ]
+                ]
+            ],
+            "generationConfig": [
+                "maxOutputTokens": 500,
+                "temperature": 0.7
+            ]
+        ]
+        
+        print("🔍 DEBUG: Request body: \(requestBody)")
+        
+        do {
+            request.httpBody = try JSONSerialization.data(withJSONObject: requestBody)
+            print("🔍 DEBUG: Request body serialized successfully")
+        } catch {
+            print("❌ DEBUG: Failed to serialize request body: \(error)")
+            completion(nil)
+            return
+        }
+        
+        print("🔍 DEBUG: Starting network request...")
+        
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            print("🔍 DEBUG: Network response received")
+            
+            if let error = error {
+                print("❌ DEBUG: Network error: \(error)")
+                completion(nil)
+                return
+            }
+            
+            if let httpResponse = response as? HTTPURLResponse {
+                print("🔍 DEBUG: HTTP Status Code: \(httpResponse.statusCode)")
+                print("🔍 DEBUG: HTTP Headers: \(httpResponse.allHeaderFields)")
+            }
+            
+            guard let data = data else {
+                print("❌ DEBUG: No data received")
+                completion(nil)
+                return
+            }
+            
+            print("🔍 DEBUG: Data received, size: \(data.count) bytes")
+            
+            if let responseString = String(data: data, encoding: .utf8) {
+                print("🔍 DEBUG: Response body: \(responseString)")
+            }
+            
+            do {
+                if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    print("🔍 DEBUG: JSON parsed successfully")
+                    print("🔍 DEBUG: JSON keys: \(json.keys)")
+                    
+                    if let error = json["error"] as? [String: Any] {
+                        print("❌ DEBUG: API Error: \(error)")
+                        completion(nil)
+                        return
+                    }
+                    
+                    if let candidates = json["candidates"] as? [[String: Any]] {
+                        print("🔍 DEBUG: Found \(candidates.count) candidates")
+                        
+                        if let firstCandidate = candidates.first {
+                            print("🔍 DEBUG: First candidate: \(firstCandidate)")
+                            
+                            if let content = firstCandidate["content"] as? [String: Any] {
+                                print("🔍 DEBUG: Content found: \(content)")
+                                
+                                if let parts = content["parts"] as? [[String: Any]] {
+                                    print("🔍 DEBUG: Found \(parts.count) parts")
+                                    
+                                    if let firstPart = parts.first {
+                                        print("🔍 DEBUG: First part: \(firstPart)")
+                                        
+                                        if let text = firstPart["text"] as? String {
+                                            print("✅ DEBUG: Successfully extracted text: \(text.prefix(50))...")
+                                            completion(text)
+                                            return
+                                        } else {
+                                            print("❌ DEBUG: No text found in first part")
+                                        }
+                                    } else {
+                                        print("❌ DEBUG: No parts found")
+                                    }
+                                } else {
+                                    print("❌ DEBUG: No parts array found")
+                                }
+                            } else {
+                                print("❌ DEBUG: No content found")
+                            }
+                        } else {
+                            print("❌ DEBUG: No candidates found")
+                        }
+                    } else {
+                        print("❌ DEBUG: No candidates array found")
+                    }
+                } else {
+                    print("❌ DEBUG: Failed to parse JSON")
+                }
+                
+                print("❌ DEBUG: Falling back to error completion")
+                completion(nil)
+                
+            } catch {
+                print("❌ DEBUG: JSON parsing error: \(error)")
+                completion(nil)
+            }
+        }.resume()
+        
+        print("🔍 DEBUG: Network request initiated")
+    }
+    
+    private func startTypingEffect(for messageId: UUID, fullText: String) {
+        var currentIndex = 0
+        let timer = Timer.scheduledTimer(withTimeInterval: 0.01, repeats: true) { timer in
+            DispatchQueue.main.async {
+                if let messageIndex = self.chatMessages.firstIndex(where: { $0.id == messageId }) {
+                    if currentIndex < fullText.count {
+                        let nextChar = String(fullText[fullText.index(fullText.startIndex, offsetBy: currentIndex)])
+                        self.chatMessages[messageIndex].displayedText += nextChar
+                        currentIndex += 1
+                    } else {
+                        // Typing effect complete
+                        self.chatMessages[messageIndex].isTyping = false
+                        timer.invalidate()
+                    }
+                } else {
+                    // Message not found, stop timer
+                    timer.invalidate()
+                }
+            }
+        }
     }
     
     private func deleteEntry(entry: HumanEntry) {
