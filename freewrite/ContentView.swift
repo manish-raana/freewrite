@@ -145,6 +145,8 @@ struct ContentView: View {
     @State private var geminiApiKey: String = UserDefaults.standard.string(forKey: "geminiApiKey") ?? ""
     @State private var selectedAIProvider: String = UserDefaults.standard.string(forKey: "selectedAIProvider") ?? "openai"
     @State private var isSendingMessage: Bool = false
+    @State private var journalContext: String = ""
+    @State private var isJournalEmbedded: Bool = false
     @State private var hoveredTrashId: UUID? = nil
     @State private var hoveredExportId: UUID? = nil
     @State private var placeholderText: String = ""  // Add this line
@@ -986,6 +988,35 @@ struct ContentView: View {
                             }
                         
                         Button(action: {
+                            if isJournalEmbedded {
+                                // Remove journal context
+                                journalContext = ""
+                                isJournalEmbedded = false
+                                let removeMessage = ChatMessage(
+                                    content: "Journal removed",
+                                    isUser: true,
+                                    timestamp: Date()
+                                )
+                                chatMessages.append(removeMessage)
+                            } else {
+                                embedJournalToChat()
+                            }
+                        }) {
+                            Image(systemName: isJournalEmbedded ? "doc.text.fill" : "doc.text")
+                                .font(.system(size: 12))
+                                .foregroundColor(isJournalEmbedded ? .blue : textColor)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .onHover { hovering in
+                            if hovering && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                NSCursor.pointingHand.push()
+                            } else {
+                                NSCursor.pop()
+                            }
+                        }
+                        
+                        Button(action: {
                             sendMessage()
                         }) {
                             Image(systemName: isSendingMessage ? "clock" : "arrow.up")
@@ -1319,9 +1350,17 @@ struct ContentView: View {
         // Set sending state
         isSendingMessage = true
         
+        // Prepare the message with embedded journal context
+        let messageToSend: String
+        if isJournalEmbedded && !journalContext.isEmpty {
+            messageToSend = "Context from my journal entry:\n\n\(journalContext)\n\nMy question: \(trimmedInput)"
+        } else {
+            messageToSend = trimmedInput
+        }
+        
         // Send to selected AI provider
         if selectedAIProvider == "openai" {
-            sendToOpenAI(message: trimmedInput) { response in
+            sendToOpenAI(message: messageToSend) { response in
                 DispatchQueue.main.async {
                     self.isSendingMessage = false
                     
@@ -1335,7 +1374,7 @@ struct ContentView: View {
                 }
             }
         } else {
-            sendToGemini(message: trimmedInput) { response in
+            sendToGemini(message: messageToSend) { response in
                 DispatchQueue.main.async {
                     self.isSendingMessage = false
                     
@@ -1573,6 +1612,21 @@ struct ContentView: View {
                 }
             }
         }
+    }
+    
+    private func embedJournalToChat() {
+        let journalText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !journalText.isEmpty else { return }
+        
+        journalContext = journalText
+        isJournalEmbedded = true
+        
+        let embedMessage = ChatMessage(
+            content: "Journal added",
+            isUser: true,
+            timestamp: Date()
+        )
+        chatMessages.append(embedMessage)
     }
     
     private func deleteEntry(entry: HumanEntry) {
